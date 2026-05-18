@@ -615,8 +615,8 @@ class AntigravityAutoShutdown:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                # Save Video 노드의 결과물을 강제로 입력받아 실행 순서를 맨 뒤로 미룸
-                "trigger_signal": ("STRING", {"forceInput": True}),
+                # 비디오 이미지, 파일명 문자열 등 임의의 포트를 강제로 입력받아 실행 순서를 미룸
+                "trigger_signal": ("*", {"forceInput": True}),
                 "vast_api_key": ("STRING", {"default": "YOUR_API_KEY_HERE"}),
                 "instance_id": ("STRING", {"default": "YOUR_INSTANCE_ID"}),
                 "enable_shutdown": ("BOOLEAN", {"default": False, "label_on": "종료 활성화", "label_off": "테스트 모드(종료 안함)"})
@@ -674,14 +674,14 @@ class AntigravityAutoShutdown:
                 print("[Antigravity] ❌ Vast.ai Instance ID가 설정되지 않았거나 기본값입니다. 종료를 건너뜁니다.")
                 return ("Instance ID Missing",)
 
-            print(f"[Antigravity] 🛑 모든 렌더링 완료 감지! Vast.ai 서버({inst_id}) 정지 명령을 전송합니다...")
-            # 백그라운드에서 실행되도록 하여 ComfyUI 프로세스 종료 시 간섭을 피함
+            print(f"[Antigravity] 🛑 모든 렌더링 완료 감지! 안전한 디스크 저장을 위해 15초 대기 후 Vast.ai 서버({inst_id}) 정지 명령을 전송합니다...")
+            # 백그라운드에서 15초 대기 후 실행되도록 하여 비디오 파일이 안전하게 저장된 후 인스턴스가 종료되게 함
             if os.name == 'nt':
-                # Windows 환경 (로컬 테스트 및 대비용)
-                os.system(f"start /B vastai stop instance {inst_id} --api-key {api_key} > NUL 2>&1")
+                # Windows 환경 (로컬 테스트 및 대비용, 15초 대기)
+                os.system(f"start /B cmd /c \"timeout 15 && vastai stop instance {inst_id} --api-key {api_key}\" > NUL 2>&1")
             else:
-                # Linux 환경 (실제 Vast.ai 서버 환경)
-                os.system(f"nohup vastai stop instance {inst_id} --api-key {api_key} > /dev/null 2>&1 &")
+                # Linux 환경 (실제 Vast.ai 서버 환경, 15초 대기)
+                os.system(f"nohup sh -c \"sleep 15 && vastai stop instance {inst_id} --api-key {api_key}\" > /dev/null 2>&1 &")
         else:
             print("[Antigravity] ⚠️ 자동 종료가 비활성화되어 있습니다. 서버를 유지합니다.")
             
