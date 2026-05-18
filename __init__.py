@@ -207,7 +207,7 @@ class AntigravityLTXBatchManager:
                     "label_on": "디버그 ON",
                     "label_off": "디버그 OFF"
                 }),
-                "vram_optimization": (["auto", "3060_12gb", "3090_24gb", "none"], {
+                "vram_optimization": (["auto", "3060_12gb", "3090_24gb", "rtx_6000_ada_48gb", "none"], {
                     "default": "auto",
                     "tooltip": "GPU별 VRAM 최적화. none 선택 시 이미지를 축소하지 않고 원본 해상도와 화질 그대로 입력합니다. (단, LTX 비디오 규격 준수를 위해 32배수 크기로 최소 조정만 수행)"
                 }),
@@ -472,6 +472,8 @@ class AntigravityLTXBatchManager:
             return 1280  # 안전한 해상도
         elif vram_optimization == "3090_24gb":
             return 2048  # 고해상도 가능
+        elif vram_optimization == "rtx_6000_ada_48gb":
+            return 3072  # 초고해상도 (48GB VRAM용)
         elif vram_optimization == "none":
             return 99999  # 원본 해상도 유지 (축소 없음)
         else:  # auto
@@ -647,6 +649,23 @@ class AntigravityAutoShutdown:
         if isinstance(inst_id, str):
             inst_id = inst_id.strip()
 
+        # Vast.ai 환경 변수 자동 감지 로직
+        import os
+        
+        # 1. API Key 자동 감지
+        if not api_key or api_key == "YOUR_API_KEY_HERE" or api_key == "":
+            env_api_key = os.environ.get("CONTAINER_API_KEY", "").strip()
+            if env_api_key:
+                api_key = env_api_key
+                print("[Antigravity] ℹ️ Vast.ai 환경 변수에서 API Key를 감지하여 자동으로 적용했습니다.")
+                
+        # 2. Instance ID 자동 감지
+        if not inst_id or inst_id == "YOUR_INSTANCE_ID" or inst_id == "":
+            env_inst_id = os.environ.get("CONTAINER_ID", "").strip()
+            if env_inst_id:
+                inst_id = env_inst_id
+                print(f"[Antigravity] ℹ️ Vast.ai 환경 변수에서 Instance ID({inst_id})를 감지하여 자동으로 적용했습니다.")
+
         if should_shutdown:
             if not api_key or api_key == "YOUR_API_KEY_HERE":
                 print("[Antigravity] ❌ Vast.ai API Key가 설정되지 않았거나 기본값입니다. 종료를 건너뜁니다.")
@@ -656,7 +675,6 @@ class AntigravityAutoShutdown:
                 return ("Instance ID Missing",)
 
             print(f"[Antigravity] 🛑 모든 렌더링 완료 감지! Vast.ai 서버({inst_id}) 정지 명령을 전송합니다...")
-            import os
             # 백그라운드에서 실행되도록 하여 ComfyUI 프로세스 종료 시 간섭을 피함
             if os.name == 'nt':
                 # Windows 환경 (로컬 테스트 및 대비용)
