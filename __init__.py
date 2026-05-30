@@ -217,20 +217,56 @@ class AntigravityLTXBatchManager:
                     "label_off": "루프 반복 OFF (완료 후 정지)",
                     "tooltip": "auto_increment 모드에서 모든 세그먼트를 실행 완료했을 때 처음부터 다시 반복할지(ON), 혹은 멈출지(OFF) 결정합니다."
                 }),
+                "target_width": ("INT", {
+                    "default": 1280,
+                    "min": 0,
+                    "max": 8192,
+                    "step": 32,
+                    "tooltip": "출력 비디오의 대상 가로 해상도 (32의 배수 권장, 0으로 설정 시 입력 이미지 해상도 기준 자동 조정)"
+                }),
+                "target_height": ("INT", {
+                    "default": 720,
+                    "min": 0,
+                    "max": 8192,
+                    "step": 32,
+                    "tooltip": "출력 비디오의 대상 세로 해상도 (32의 배수 권장, 0으로 설정 시 입력 이미지 해상도 기준 자동 조정)"
+                }),
+                "frame_rate": ("INT", {
+                    "default": 24,
+                    "min": 1,
+                    "max": 120,
+                    "step": 1,
+                    "tooltip": "비디오 생성에 사용할 프레임 레이트 (기본 24fps)"
+                }),
+                "reference_strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 2.0,
+                    "step": 0.05,
+                    "tooltip": "참조 이미지 가이드 강도"
+                }),
+                "external_reference_images": ("IMAGE", {
+                    "tooltip": "외부 노드(예: Character Ref Sheet 등)에서 생성된 참조 이미지(배치)를 직접 받습니다. 없을 경우 JSON의 reference_images 목록을 로드합니다."
+                }),
             }
         }
     
     RETURN_TYPES = (
-        "IMAGE",    # first_frame
-        "STRING",   # prompt
-        "FLOAT",    # audio_start
-        "FLOAT",    # duration
-        "FLOAT",    # motion_strength
-        "INT",      # steps
-        "STRING",   # segment_id
-        "STRING",   # negative_prompt
-        "INT",      # width
-        "INT",      # height
+        "IMAGE",        # first_frame
+        "STRING",       # prompt
+        "FLOAT",        # audio_start
+        "FLOAT",        # duration
+        "FLOAT",        # motion_strength
+        "INT",          # steps
+        "STRING",       # segment_id
+        "STRING",       # negative_prompt
+        "INT",          # width
+        "INT",          # height
+        "GUIDE_DATA",   # guide_data for LTX Director Guide
+        "INT",          # clean_latent_frames
+        "INT",          # clean_pixel_frames
+        "INT",          # total_latent_frames
+        "INT",          # total_pixel_frames
     )
     
     RETURN_NAMES = (
@@ -244,21 +280,26 @@ class AntigravityLTXBatchManager:
         "negative_prompts",
         "widths",
         "heights",
+        "guide_data",
+        "clean_latent_frames",
+        "clean_pixel_frames",
+        "total_latent_frames",
+        "total_pixel_frames",
     )
     
-    # 🔑 핵심: ComfyUI 자동 배치 처리 활성화
-    OUTPUT_IS_LIST = (True, True, True, True, True, True, True, True, True, True)
+    # 🔑 핵심: ComfyUI 자동 배치 처리 활성화 (새로운 출력 포트도 전부 리스트 지원)
+    OUTPUT_IS_LIST = (True, True, True, True, True, True, True, True, True, True, True, True, True, True, True)
     
     FUNCTION = "process_batch"
     CATEGORY = "🚀 Antigravity/LTX"
     
     @classmethod
-    def IS_CHANGED(cls, json_config, image_directory=".", enable_debug=True, vram_optimization="auto", run_mode="all", single_segment_index=0, single_segment_id="auto", loop_on_complete=True):
+    def IS_CHANGED(cls, json_config, image_directory=".", run_mode="all", single_segment_index=0, single_segment_id="auto", loop_on_complete=True, enable_debug=True, vram_optimization="auto", target_width=1280, target_height=720, frame_rate=24, reference_strength=1.0, external_reference_images=None):
         # auto_increment 모드일 때만 매번 실행되도록 타임스탬프 반환
         if run_mode == "auto_increment":
             import time
             return time.time()
-        # 그 외에는 json_config 등이 변경될 때만 실행
+        # 그 외에는 파라미터가 변경될 때 해시값 반환
         import hashlib
         h = hashlib.sha256()
         h.update(json_config.encode('utf-8'))
@@ -267,9 +308,14 @@ class AntigravityLTXBatchManager:
         h.update(str(single_segment_index).encode('utf-8'))
         h.update(single_segment_id.encode('utf-8'))
         h.update(str(loop_on_complete).encode('utf-8'))
+        h.update(str(target_width).encode('utf-8'))
+        h.update(str(target_height).encode('utf-8'))
+        h.update(str(frame_rate).encode('utf-8'))
+        h.update(str(reference_strength).encode('utf-8'))
         return h.hexdigest()
         
-    def process_batch(self, json_config, image_directory=".", enable_debug=True, vram_optimization="auto", run_mode="all", single_segment_index=0, single_segment_id="auto", loop_on_complete=True):
+    def process_batch(self, json_config, image_directory=".", run_mode="all", single_segment_index=0, single_segment_id="auto", loop_on_complete=True, enable_debug=True, vram_optimization="auto", target_width=1280, target_height=720, frame_rate=24, reference_strength=1.0, external_reference_images=None):
+        import torch.nn.functional as F
         
         # JSON 파싱 및 검증
         try:
@@ -291,6 +337,13 @@ class AntigravityLTXBatchManager:
         negative_prompts = []
         widths = []
         heights = []
+        
+        # 신규 LTX Sequencer / Director Guide 연동 포트 리스트
+        guide_data_list = []
+        clean_latent_frames_list = []
+        clean_pixel_frames_list = []
+        total_latent_frames_list = []
+        total_pixel_frames_list = []
         
         # 경로 설정
         input_dir = folder_paths.get_input_directory()
@@ -391,6 +444,7 @@ class AntigravityLTXBatchManager:
             print(f"[Antigravity] 🎬 프로젝트: {project_title}")
             print(f"[Antigravity] 모드: {run_mode} (전체 세그먼트 수: {original_total}, 실행 세그먼트 수: {len(segments)})")
             print(f"[Antigravity] VRAM 최적화: {vram_optimization} (최대 해상도: {max_resolution})")
+            print(f"[Antigravity] 대상 해상도: {target_width}x{target_height} (0: 자동) | 프레임레이트: {frame_rate}fps")
             print(f"{'='*60}")
         
         # 세그먼트별 처리
@@ -399,10 +453,10 @@ class AntigravityLTXBatchManager:
             seg_id = segment.get("id", f"SEG_{idx:02d}")
             img_file = segment.get("image", "")
             
-            # 이미지 로드 및 캐싱
+            # 1단계: 기본 비디오 시작용 이미지 로드 및 최적화
             if img_file not in image_cache:
                 tensor = self._load_and_optimize_image(
-                    image_dir, input_dir, img_file, max_resolution, enable_debug
+                    image_dir, input_dir, img_file, max_resolution, target_width, target_height, enable_debug
                 )
                 if tensor is None:
                     if enable_debug:
@@ -410,44 +464,140 @@ class AntigravityLTXBatchManager:
                     continue
                 image_cache[img_file] = tensor
             
-            # 파라미터 수집
             tensor = image_cache[img_file]
             images.append(tensor)
+            
+            # 2단계: 참조 가이드 이미지(Reference Images) 패킹 처리
+            # 💡 핵심: ltx_director_guide.py 와 nodes_lt.py는 4D 텐서 [1, H, W, C] 형식을 완벽하게 기대합니다.
+            # 3D 텐서로 압축될 경우 spatial 차원 충돌로 ValueError가 나므로 [1, H, W, C] 형태를 무조건 유지합니다!
+            refs_tensors = []
+            
+            # 2-a. 외부 포트(external_reference_images) 이미지 입력 처리
+            if external_reference_images is not None:
+                # external_reference_images shape: [B, H, W, C]
+                num_ref_frames = external_reference_images.shape[0]
+                for b_idx in range(num_ref_frames):
+                    # B=1을 안전하게 유지하기 위해 슬라이싱 적용 -> [1, H, W, C]
+                    ref_frame = external_reference_images[b_idx:b_idx+1] 
+                    src_h, src_w = ref_frame.shape[1], ref_frame.shape[2]
+                    
+                    # 해상도 보장 (LTX 32배수)
+                    if target_width > 0 and target_height > 0:
+                        new_w = int(round(target_width / 32.0) * 32)
+                        new_h = int(round(target_height / 32.0) * 32)
+                    else:
+                        if max(src_w, src_h) > max_resolution:
+                            ratio = max_resolution / max(src_w, src_h)
+                            new_w = int(round(src_w * ratio / 32.0) * 32)
+                            new_h = int(round(src_h * ratio / 32.0) * 32)
+                        else:
+                            new_w = int(round(src_w / 32.0) * 32)
+                            new_h = int(round(src_h / 32.0) * 32)
+                    new_w = max(32, new_w)
+                    new_h = max(32, new_h)
+                    
+                    if new_w != src_w or new_h != src_h:
+                        # PyTorch의 interpolation 기능을 이용한 리사이징
+                        # [1, H, W, C] -> [1, C, H, W]
+                        tmp_tensor = ref_frame.squeeze(0).permute(2, 0, 1).unsqueeze(0)
+                        resized_tmp = F.interpolate(tmp_tensor, size=(new_h, new_w), mode='bilinear', align_corners=False)
+                        # [1, C, H, W] -> [1, H, W, C]
+                        ref_frame = resized_tmp.squeeze(0).permute(1, 2, 0).unsqueeze(0)
+                        if enable_debug and b_idx == 0:
+                            print(f"[Antigravity] 📐 외부 참조 이미지 리사이징(32배수): {src_w}x{src_h} → {new_w}x{new_h}")
+                    
+                    refs_tensors.append(ref_frame)
+            else:
+                # 2-b. JSON 설정의 reference_images 목록 탐색 및 로드
+                ref_list = segment.get("reference_images", [])
+                if isinstance(ref_list, str):
+                    ref_list = [ref_list]
+                for ref_file in ref_list:
+                    ref_tensor = self._load_and_optimize_image(
+                        image_dir, input_dir, ref_file, max_resolution, target_width, target_height, enable_debug
+                    )
+                    if ref_tensor is not None:
+                        # 4D 텐서 [1, H, W, C] 그대로 보존하여 보냄
+                        refs_tensors.append(ref_tensor)
+            
+            # 3단계: LTX-Video 시간축 8배수 기반의 정밀 프레임 연산 공식
+            seg_duration = float(segment.get("duration", 15.0))
+            
+            # (1) 순수 본편 영상 프레임 계산
+            clean_pix = round(seg_duration * frame_rate) + 1
+            clean_lat = ((clean_pix - 1) // 8) + 1
+            
+            # (2) 가이드 이미지 수량에 따른 최종 프레임 계산
+            num_refs = len(refs_tensors)
+            
+            # 💡 [시간축 완충 구간 (Temporal Gap Buffer) 적용]
+            # LTX 모델의 시간축 어텐션 번짐(Temporal Bleeding)으로 인한 마지막 1초의 페이드아웃(어두워짐)을 원천 차단하기 위해,
+            # 본편 영상과 어두운 참조 이미지 사이에 3개 레이턴트 블록(24프레임 = 약 1.0초 분량)의 빈 완충 공간을 배치합니다!
+            # 어둠 번짐은 이 빈 구간이 전부 흡수하며, 최종 저장(Slice) 시에는 이 완충 구간까지 통째로 싹둑 잘라내 버리므로
+            # 본편 12초/18.8초 영상은 마지막 1초까지 어두워짐 전혀 없이 완전하게 쨍하고 선명하게 출력됩니다!
+            temporal_gap = 3
+            tot_lat = clean_lat + temporal_gap + num_refs
+            tot_pix = ((tot_lat - 1) * 8) + 1
+            
+            # (3) LTX Director Guide에 넘길 guide_data 구성
+            # 💡 하이브리드 가이드 구조:
+            # - 0초 지점(f_idx=0)에는 LoRA가 학습된 '스타트 이미지'를 100% 강도(1.0)로 강력히 고정 ➡️ 얼굴 뭉개짐/기괴화 원천 차단!
+            # - Hidden Zone 지점에는 캐릭터/배경 시트를 사용자가 설정한 은은한 강도(reference_strength=0.3)로 주입 ➡️ 의상/무대 배경 스타일만 시네마틱하게 이식!
+            g_data = {
+                "images": [],
+                "insert_frames": [],
+                "strengths": []
+            }
+            
+            # [1] 0초 스타트 이미지 박제 (LoRA 얼굴 정밀 픽스)
+            # tensor: [1, H, W, C] 4D 텐서 규격 그대로 주입
+            g_data["images"].append(tensor)
+            g_data["insert_frames"].append(0)
+            g_data["strengths"].append(1.0) 
+            
+            # [2] Hidden Zone 참조 시트 주입 (의상 및 배경 스타일 전사)
+            for i, ref_t in enumerate(refs_tensors):
+                # 완충 공간(temporal_gap)만큼 뒤로 밀어서 안전 격리 배치
+                insert_point = (clean_lat + temporal_gap + i) * 8
+                g_data["images"].append(ref_t)
+                g_data["insert_frames"].append(insert_point)
+                g_data["strengths"].append(float(reference_strength))
+            
+            # 수집
             prompts.append(segment.get("prompt", ""))
             audio_starts.append(float(segment.get("start", 0.0)))
-            durations.append(float(segment.get("duration", 15.0)))
+            durations.append(seg_duration)
             motion_strengths.append(float(segment.get("motion_strength", 0.5)))
             steps_list.append(int(segment.get("steps", 32)))
             segment_ids.append(seg_id)
             negative_prompts.append(
                 segment.get("negative_prompt", default_negative)
             )
-            # 해상도 정보 수집
+            
+            # 크기 정보 수집
             widths.append(int(tensor.shape[2]))
             heights.append(int(tensor.shape[1]))
             
+            # 신규 계산 프레임 및 가이드 수집
+            clean_latent_frames_list.append(clean_lat)
+            clean_pixel_frames_list.append(clean_pix)
+            total_latent_frames_list.append(tot_lat)
+            total_pixel_frames_list.append(tot_pix)
+            guide_data_list.append(g_data)
+            
             if enable_debug:
-                start = float(segment.get("start", 0.0))
-                dur = float(segment.get("duration", 15.0))
-                motion = float(segment.get("motion_strength", 0.5))
-                steps = int(segment.get("steps", 32))
                 print(
                     f"[Antigravity] ✅ [{idx:02d}] {seg_id} | "
                     f"이미지: {img_file} | "
                     f"크기: {tensor.shape[2]}x{tensor.shape[1]} | "
-                    f"{start}초~{start+dur}초 | "
-                    f"motion: {motion} | steps: {steps}"
+                    f"{seg_duration}초 | 본편: {clean_pix}F ({clean_lat}L) | "
+                    f"참조 이미지: {num_refs}장 | 총합: {tot_pix}F ({tot_lat}L)"
                 )
         
         total = len(images)
         
         if enable_debug:
-            estimated_time_3060 = total * 12  # 분
-            estimated_time_3090 = total * 3.5  # 분
-            print(f"\n[Antigravity] 🚀 총 {total}개 세그먼트 배치 준비 완료!")
-            print(f"[Antigravity] 예상 처리 시간:")
-            print(f"  - RTX 3060: 약 {estimated_time_3060}분")
-            print(f"  - RTX 3090: 약 {estimated_time_3090}분")
+            print(f"\n[Antigravity] 🚀 총 {total}개 세그먼트 배치 연동 및 프레임 정밀 계산 완료!")
             print(f"{'='*60}\n")
         
         if total == 0:
@@ -464,6 +614,11 @@ class AntigravityLTXBatchManager:
             negative_prompts,
             widths,
             heights,
+            guide_data_list,
+            clean_latent_frames_list,
+            clean_pixel_frames_list,
+            total_latent_frames_list,
+            total_pixel_frames_list,
         )
     
     def _get_max_resolution(self, vram_optimization):
@@ -479,7 +634,7 @@ class AntigravityLTXBatchManager:
         else:  # auto
             return 1536  # 중간값
     
-    def _load_and_optimize_image(self, image_dir, input_dir, img_file, max_resolution, debug=True):
+    def _load_and_optimize_image(self, image_dir, input_dir, img_file, max_resolution, target_width=1280, target_height=720, debug=True):
         """이미지 로드 및 VRAM 최적화 (32배수로 해상도 조절)"""
         
         # 1단계: image_dir에서 탐색 및 해결
@@ -510,15 +665,22 @@ class AntigravityLTXBatchManager:
         try:
             pil = Image.open(path).convert("RGB")
             
-            # VRAM 최적화: 해상도 조정 (LTX 비디오 호환을 위해 32배수 보장)
+            # VRAM 최적화 및 수동 해상도 지정 로직 적용 (LTX 32배수 보장)
             w, h = pil.size
-            if max(w, h) > max_resolution:
-                ratio = max_resolution / max(w, h)
-                new_w = int(round(w * ratio / 32.0) * 32)
-                new_h = int(round(h * ratio / 32.0) * 32)
+            
+            if target_width > 0 and target_height > 0:
+                new_w = int(round(target_width / 32.0) * 32)
+                new_h = int(round(target_height / 32.0) * 32)
+                if debug and (new_w != target_width or new_h != target_height):
+                    print(f"[Antigravity] 📏 입력된 해상도({target_width}x{target_height})를 LTX 32배수 규격에 맞춰 조정합니다: {new_w}x{new_h}")
             else:
-                new_w = int(round(w / 32.0) * 32)
-                new_h = int(round(h / 32.0) * 32)
+                if max(w, h) > max_resolution:
+                    ratio = max_resolution / max(w, h)
+                    new_w = int(round(w * ratio / 32.0) * 32)
+                    new_h = int(round(h * ratio / 32.0) * 32)
+                else:
+                    new_w = int(round(w / 32.0) * 32)
+                    new_h = int(round(h / 32.0) * 32)
             
             new_w = max(32, new_w)
             new_h = max(32, new_h)
@@ -688,7 +850,88 @@ class AntigravityAutoShutdown:
         return ("Shutdown Executed",)
 
 
-# ComfyUI 노드 등록
+# ==============================================================================
+# 🌐 스마트 이미지 로케이터 API 추가 (프론트엔드 엑박 방지 기술)
+# ==============================================================================
+try:
+    from server import PromptServer
+    from aiohttp import web
+    import urllib.parse
+
+    @PromptServer.instance.routes.get("/antigravity/view")
+    async def api_antigravity_view(request):
+        import urllib.parse
+        params = request.query
+        
+        # 💡 한글 인코딩 깨짐을 원천 차단하기 위해 unquote 적용
+        filename = urllib.parse.unquote(params.get("filename", ""))
+        image_directory = urllib.parse.unquote(params.get("image_dir", ""))
+
+        print(f"\n[Antigravity API] 📥 요청 수신 -> 파일명: {filename} | 폴더명: {image_directory}")
+
+        if not filename:
+            return web.Response(status=400, text="Missing filename")
+
+        try:
+            input_dir = folder_paths.get_input_directory()
+        except Exception:
+            input_dir = os.path.join(os.getcwd(), "input")
+
+        # 1. 백엔드와 완전히 동일한 경로 탐색 수행
+        if image_directory and image_directory != ".":
+            # 절대 경로가 아니면 input_dir 하위로 병합
+            if not os.path.isabs(image_directory):
+                image_dir = os.path.join(input_dir, image_directory)
+            else:
+                image_dir = image_directory
+        else:
+            image_dir = input_dir
+
+        print(f"[Antigravity API] 📁 1차 탐색 디렉토리: {image_dir}")
+
+        resolved_path = resolve_image_path(image_dir, filename)
+
+        # 서브폴더에서 못 찾으면 input 루트 폴더에서도 한번 더 유연하게 탐색
+        if resolved_path is None:
+            print(f"[Antigravity API] ⚠️ 1차 탐색 실패. input 루트({input_dir})에서 2차 탐색 시도...")
+            resolved_path = resolve_image_path(input_dir, filename)
+
+        # 끝내 못 찾았을 경우 404
+        if resolved_path is None or not os.path.exists(resolved_path):
+            print(f"[Antigravity API] ❌ 이미지 찾기 최종 실패: {filename} (조회 폴더: {image_dir})")
+            return web.Response(status=404, text=f"Image not found: {filename}")
+
+        resolved_path = os.path.abspath(resolved_path)
+        input_dir_abs = os.path.abspath(input_dir)
+
+        print(f"[Antigravity API] 🎉 이미지 발견! 물리 경로: {resolved_path}")
+
+        # 2. 찾은 경로가 input 디렉토리 하위인 경우 리다이렉트 처리 (보안 우수)
+        if resolved_path.startswith(input_dir_abs):
+            rel_path = os.path.relpath(resolved_path, input_dir_abs)
+            rel_path = rel_path.replace("\\", "/") # 윈도우 경로 정제
+            
+            subfolder = os.path.dirname(rel_path)
+            real_filename = os.path.basename(rel_path)
+            
+            redirect_url = f"/view?filename={urllib.parse.quote(real_filename)}&type=input"
+            if subfolder:
+                redirect_url += f"&subfolder={urllib.parse.quote(subfolder)}"
+                
+            print(f"[Antigravity API] 🔄 ComfyUI 기본 /view API로 리다이렉트 -> {redirect_url}\n")
+            return web.HTTPFound(redirect_url)
+        else:
+            # input 디렉토리 외부라면 FileResponse를 통해 안전 서빙
+            print(f"[Antigravity API] 📦 input 외부 경로 파일 직접 서빙 -> {resolved_path}\n")
+            return web.FileResponse(resolved_path)
+
+except Exception as api_err:
+    print(f"[Antigravity] ⚠️ 스마트 이미지 로케이터 API 등록 실패: {api_err}")
+
+
+# ComfyUI 노드 및 프론트엔드 연동 등록
+WEB_DIRECTORY = "web"
+
 NODE_CLASS_MAPPINGS = {
     "AntigravityLTXBatchManager": AntigravityLTXBatchManager,
     "AntigravitySegmentNamer": AntigravitySegmentNamer,
